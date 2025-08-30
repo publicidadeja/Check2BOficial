@@ -1,4 +1,3 @@
-
 // src/lib/firebase.ts
 import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
 import { getFirestore, Firestore } from "firebase/firestore";
@@ -25,74 +24,95 @@ const requiredConfigKeysForInit: (keyof typeof firebaseConfig)[] = [
     'projectId',
 ];
 
-if (typeof window !== 'undefined') {
-    console.log("[Firebase Lib FINAL] Running in browser environment.");
+// This function now encapsulates the entire initialization logic for clarity.
+const initializeFirebaseServices = () => {
+    if (typeof window === 'undefined') {
+        console.log("[Firebase Lib] Skipping client-side Firebase initialization (not in browser).");
+        return;
+    }
+
+    console.log("[Firebase Lib] Running in browser environment.");
 
     const allRequiredPresent = requiredConfigKeysForInit.every(key => firebaseConfig[key]);
 
-    if (allRequiredPresent) {
-        try {
-            if (!getApps().length) {
-                console.log("[Firebase Lib FINAL] Initializing Firebase app for project:", firebaseConfig.projectId);
-                app = initializeApp(firebaseConfig);
-            } else {
-                app = getApp();
-                console.log("[Firebase Lib FINAL] Firebase app already initialized for project:", app.options.projectId);
-            }
+    if (!allRequiredPresent) {
+        const missingCriticalKeys = requiredConfigKeysForInit.filter(key => !firebaseConfig[key]);
+        console.error("[Firebase Lib] Firebase Web App initialization SKIPPED due to missing CRITICAL configuration keys:", missingCriticalKeys.join(', '));
+        // alert(`Erro de configuração do Firebase: Chaves CRÍTICAS ausentes: ${missingCriticalKeys.join(', ')}. Verifique suas variáveis de ambiente e recarregue a página.`);
+        return;
+    }
+
+    try {
+        if (!getApps().length) {
+            console.log("[Firebase Lib] Initializing Firebase app for project:", firebaseConfig.projectId);
+            app = initializeApp(firebaseConfig);
+        } else {
+            app = getApp();
+            console.log("[Firebase Lib] Firebase app already initialized for project:", app.options.projectId);
+        }
+
+        if (app) {
+            // Initialize services immediately after app is available
+            db = getFirestore(app);
+            authInstance = getAuth(app);
 
             // --- APP CHECK INITIALIZATION ---
-            if (app && !appCheckInstance) {
-                // Prioritize debug token from URL for WebView scenarios
+            // Only initialize App Check once.
+            if (!appCheckInstance) {
                 const urlParams = new URLSearchParams(window.location.search);
                 const debugTokenFromUrl = urlParams.get('appCheckDebugToken');
-                const debugTokenFromEnv = process.env.NEXT_PUBLIC_APPCHECK_DEBUG_TOKEN;
 
-                const finalDebugToken = debugTokenFromUrl || (process.env.NODE_ENV === 'development' ? debugTokenFromEnv : undefined);
-                
-                if (finalDebugToken) {
-                    console.log("[Firebase Lib FINAL] App Check: Using CustomProvider with DEBUG TOKEN.");
+                if (debugTokenFromUrl) {
+                    // This is the CRITICAL path for the Flutter WebView in debug mode.
+                    console.log("[Firebase Lib] App Check: Using CustomProvider with DEBUG TOKEN from URL.");
+                    // Assign the token to window for persistence across re-renders in dev mode
+                    (window as any).FIREBASE_APPCHECK_DEBUG_TOKEN = debugTokenFromUrl;
                     appCheckInstance = initializeAppCheck(app, {
                         provider: new CustomProvider({
                             getToken: () => Promise.resolve({
-                                token: finalDebugToken,
+                                token: debugTokenFromUrl,
                                 expireTimeMillis: Date.now() + 60 * 60 * 1000, // 1 hour
                             }),
                         }),
+                        isTokenAutoRefreshEnabled: false // No need to refresh a static debug token
+                    });
+                } else if (process.env.NODE_ENV === 'development' && process.env.NEXT_PUBLIC_APPCHECK_DEBUG_TOKEN) {
+                    // This is for local web development (`localhost`)
+                    console.log("[Firebase Lib] App Check: Using CustomProvider with DEBUG TOKEN from environment variables for localhost.");
+                    (window as any).FIREBASE_APPCHECK_DEBUG_TOKEN = process.env.NEXT_PUBLIC_APPCHECK_DEBUG_TOKEN;
+                    appCheckInstance = initializeAppCheck(app, {
+                        provider: new CustomProvider({
+                           getToken: () => Promise.resolve({
+                                token: process.env.NEXT_PUBLIC_APPCHECK_DEBUG_TOKEN!,
+                                expireTimeMillis: Date.now() + 60 * 60 * 1000, // 1 hour
+                            }),
+                        }),
+                        isTokenAutoRefreshEnabled: false
+                    });
+                } else if (process.env.NEXT_PUBLIC_RECAPTCHA_SITE_KEY) {
+                    // This is for PRODUCTION environment
+                    console.log("[Firebase Lib] App Check: Initializing with ReCaptcha for PRODUCTION.");
+                    appCheckInstance = initializeAppCheck(app, {
+                        provider: new ReCaptchaEnterpriseProvider(process.env.NEXT_PUBLIC_RECAPTCHA_SITE_KEY),
                         isTokenAutoRefreshEnabled: true
                     });
                 } else {
-                    const recaptchaSiteKey = process.env.NEXT_PUBLIC_RECAPTCHA_SITE_KEY;
-                    if (recaptchaSiteKey) {
-                        console.log("[Firebase Lib FINAL] App Check: Initializing with ReCaptcha for PRODUCTION.");
-                        appCheckInstance = initializeAppCheck(app, {
-                            provider: new ReCaptchaEnterpriseProvider(recaptchaSiteKey),
-                            isTokenAutoRefreshEnabled: true
-                        });
-                    } else {
-                         console.error("[Firebase Lib FINAL CRITICAL] App Check NOT INITIALIZED. ReCaptcha key is missing for production mode.");
-                    }
+                    console.error("[Firebase Lib CRITICAL] App Check NOT INITIALIZED. ReCaptcha key is missing for production, and no debug token was provided.");
                 }
             }
-            // --- END APP CHECK ---
 
-            if (app) {
-                db = getFirestore(app);
-                authInstance = getAuth(app);
-                console.log("[Firebase Lib FINAL] Firebase App, Firestore, and Auth setup completed.");
-            }
-
-        } catch (error) {
-            console.error("[Firebase Lib FINAL] Firebase initialization failed:", error);
-            alert("Falha ao inicializar a conexão com o servidor. Verifique a configuração do Firebase e o console (F12).");
+            console.log("[Firebase Lib] Firebase App, Firestore, and Auth setup completed.");
         }
-    } else {
-        const missingCriticalKeys = requiredConfigKeysForInit.filter(key => !firebaseConfig[key]);
-        console.error("[Firebase Lib FINAL] Firebase Web App initialization SKIPPED due to missing CRITICAL configuration keys:", missingCriticalKeys.join(', '));
-        alert(`Erro de configuração do Firebase: Chaves CRÍTICAS ausentes: ${missingCriticalKeys.join(', ')}. Verifique suas variáveis de ambiente e recarregue a página.`);
+
+    } catch (error) {
+        console.error("[Firebase Lib] Firebase initialization failed:", error);
+        // alert("Falha ao inicializar a conexão com o servidor. Verifique a configuração do Firebase e o console (F12).");
     }
-} else {
-    console.log("[Firebase Lib FINAL] Skipping client-side Firebase initialization (not in browser).");
-}
+};
+
+// Run initialization logic immediately upon import on the client-side.
+initializeFirebaseServices();
+
 
 export const getFirebaseApp = (): FirebaseApp | null => {
     if (!app && typeof window !== 'undefined' && getApps().length > 0) {
@@ -102,27 +122,16 @@ export const getFirebaseApp = (): FirebaseApp | null => {
 };
 
 export const getDb = (): Firestore | null => {
-    const currentApp = getFirebaseApp();
-    if (!db && currentApp) {
-        db = getFirestore(currentApp);
-    }
+    // No need to re-initialize here, it's handled above.
     return db;
 }
 
 export const getAuthInstance = (): Auth | null => {
-    const currentApp = getFirebaseApp();
-    if (!authInstance && currentApp) {
-        authInstance = getAuth(currentApp);
-    }
+    // No need to re-initialize here.
     return authInstance;
 }
 
 export const getAppCheckInstance = (): AppCheck | null => {
-    if (!appCheckInstance) {
-        const currentApp = getFirebaseApp();
-        if (currentApp) {
-             console.warn("[Firebase Lib FINAL] getAppCheckInstance called, but instance was null. This might indicate an initialization issue.");
-        }
-    }
+    // No need to re-initialize here.
     return appCheckInstance;
 }
